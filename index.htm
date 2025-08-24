@@ -1,12 +1,197 @@
 <!DOCTYPE html>
-<html>
+<html lang="fa">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mini Battle Royale</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #chat-container {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+        }
+
+        #chat-box {
+            height: 100px;
+            overflow-y: auto;
+        }
+
+        #chat-input {
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+    </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
-    <style>body { margin: 0; }</style>
 </head>
 <body>
-    <script src="game.js"></script>
+    <div id="chat-container">
+        <input id="chat-input" placeholder="پیام خود را وارد کنید..."/>
+        <div id="chat-box"></div>
+    </div>
+
+    <script>
+        const config = {
+            type: Phaser.AUTO,
+            width: 800,
+            height: 600,
+            physics: { default: 'arcade' },
+            scene: { preload, create, update }
+        };
+
+        const game = new Phaser.Game(config);
+        let player, others = {}, bullets = {}, socket;
+        let cursors, chatContainer, chatInput;
+
+        function preload() {
+            this.load.image('player', 'https://labs.phaser.io/assets/sprites/phaser-dude.png');
+            this.load.image('bullet', 'https://labs.phaser.io/assets/sprites/bullet.png');
+            this.load.image('map', 'https://labs.phaser.io/assets/sprites/phaser-background.png');
+        }
+
+        function create() {
+            socket = io();
+            this.add.image(400, 300, 'map');
+
+            player = this.physics.add.sprite(400, 300, 'player');
+            player.setCollideWorldBounds(true);
+
+            cursors = this.input.keyboard.createCursorKeys();
+
+            socket.on('currentPlayers', (players) => {
+                Object.entries(players).forEach(([id, data]) => {
+                    if (id !== socket.id) {
+                        addOtherPlayers(this, data, id);
+                    }
+                });
+            });
+
+            socket.on('newPlayer', (data) => {
+                addOtherPlayers(this, data.player, data.id);
+            });
+
+            socket.on('playerMoved', ({ id, x, y }) => {
+                if (others[id]) others[id].setPosition(x, y);
+            });
+
+            socket.on('playerLeft', (id) => {
+                if (others[id]) others[id].destroy();
+            });
+
+            this.input.on('pointerdown', (pointer) => {
+                fireBullet(this, pointer);
+            });
+
+            socket.on('bulletAdded', (bulletData) => {
+                const bullet = this.physics.add.sprite(bulletData.x, bulletData.y, 'bullet');
+                bullet.rotation = bulletData.rotation;
+                this.physics.velocityFromRotation(bulletData.rotation, bulletData.speed, bullet.body.velocity);
+                bullets[bulletData.id] = bullet;
+            });
+
+            socket.on('bulletHit', (data) => {
+                if (others[data.playerId]) {
+                    others[data.playerId].destroy();
+                    delete others[data.playerId];
+                }
+            });
+
+            chatContainer = document.getElementById('chat-box');
+
+            chatInput = document.getElementById('chat-input');
+            chatInput.addEventListener('keypress', function (event) {
+                if (event.key === 'Enter') {
+                    const message = chatInput.value;
+                    socket.emit('chatMessage', message);
+                    chatInput.value = '';
+                }
+            });
+
+            socket.on('chatMessage', (message) => {
+                chatBox.innerHTML += `<div>${message}</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight; // Scroll to the bottom
+            });
+        }
+
+        function update() {
+            if (cursors.left.isDown) player.x -= 3;
+            if (cursors.right.isDown) player.x += 3;
+            if (cursors.up.isDown) player.y -= 3;
+            if (cursors.down.isDown) player.y += 3;
+
+            if (socket) {
+                socket.emit('move', { x: player.x, y: player.y });
+            }
+        }
+
+        function addOtherPlayers(scene, playerInfo, id) {
+            others[id] = scene.physics.add.sprite(playerInfo.x, playerInfo.y, 'player');
+        }
+
+        function fireBullet(scene, pointer) {
+            const bulletSpeed = 500;
+            const angle = Phaser.Math.Angle.Between(player.x, player.y, pointer.worldX, pointer.worldY);
+            socket.emit('bulletFired', {
+                x: player.x,
+                y: player.y,
+                rotation: angle,
+                speed: bulletSpeed,
+                id: socket.id
+            });
+        }
+
+        // Server-side code
+        const serverCode = `
+        const express = require('express');
+        const app = express();
+        const http = require('http').createServer(app);
+        const io = require('socket.io')(http);
+
+        app.use(express.static(__dirname));
+        const players = {};
+
+        io.on('connection', (socket) => {
+            players[socket.id] = { x: 400, y: 300 };
+            socket.emit('currentPlayers', players);
+            socket.broadcast.emit('newPlayer', { id: socket.id, player: players[socket.id] });
+
+            socket.on('move', (pos) => {
+                players[socket.id] = pos;
+                socket.broadcast.emit('playerMoved', { id: socket.id, ...pos });
+            });
+
+            socket.on('bulletFired', (bulletData) => {
+                const bulletId = socket.id + Date.now();
+                io.emit('bulletAdded', { ...bulletData, id: bulletId });
+                
+                // Simulate bullet hit for demo purposes (you can replace this with actual collision detection)
+                setTimeout(() => {
+                    io.emit('bulletHit', { playerId: socket.id });
+                }, 2000);
+            });
+
+            socket.on('chatMessage', (message) => {
+                io.emit('chatMessage', message);
+            });
+
+            socket.on('disconnect', () => {
+                delete players[socket.id];
+                io.emit('playerLeft', socket.id);
+            });
+        });
+
+        http.listen(3000, () => console.log('Server running on port 3000'));
+        `;
+    </script>
 </body>
 </html>
